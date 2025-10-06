@@ -43,7 +43,6 @@ CONFIG = {
     'timezone': 'America/New_York',
 }
 
-
 def _range_label(start_str, end_str):
     """Compact human label like "Sep 01–16, 2025" or cross-month/year if needed."""
     s = datetime.fromisoformat(start_str)
@@ -53,7 +52,6 @@ def _range_label(start_str, end_str):
     if s.year == e.year:
         return f"{s.strftime('%b %d')}–{e.strftime('%b %d, %Y')}"
     return f"{s.strftime('%b %d, %Y')}–{e.strftime('%b %d, %Y')}"
-
 
 def download_data():
     """Download complete weather data including test period"""
@@ -79,22 +77,37 @@ def convert_to_datetime(df):
     df.index = dt_index.tz_convert(CONFIG['timezone'])
     return df
 
-def create_features(df):
+def create_features(df, previous_data=None):
     """
-    Create features:
-    - Temperature lag features (backward-looking only)
-    - Rolling statistics (shifted by 1 to prevent using current value)
-    - One-hot encode hour of day (24 features)
-    - One-hot encode day of week (7 features)
+    Create features with support for cross-boundary lag features
+    
+    Args:
+        df: Current dataframe to create features for
+        previous_data: Previous data (train/val) to use for initial lag values
     """
     df = df.copy()
     
-    # Temperature lag features
-    df['temp_lag_24h'] = df['temp'].shift(24)    # Yesterday same hour
-    df['temp_lag_48h'] = df['temp'].shift(48)    # 2 days ago
-    df['temp_lag_168h'] = df['temp'].shift(168)  # 1 week ago
+    # If we have previous data, combine it to calculate lags across boundary
+    if previous_data is not None:
+        # Combine previous data with current data for lag calculations
+        combined = pd.concat([previous_data, df])
+        combined = combined.sort_index()
+        
+        # Calculate lags on combined data
+        combined['temp_lag_24h'] = combined['temp'].shift(24)
+        combined['temp_lag_48h'] = combined['temp'].shift(48)
+        combined['temp_lag_168h'] = combined['temp'].shift(168)
+        
+        # Extract just the current portion
+        current_mask = combined.index >= df.index.min()
+        df = combined[current_mask].copy()
+    else:
+        # For training data, calculate normally
+        df['temp_lag_24h'] = df['temp'].shift(24)
+        df['temp_lag_48h'] = df['temp'].shift(48)
+        df['temp_lag_168h'] = df['temp'].shift(168)
     
-    # Rolling statistics
+    # Rolling statistics (shifted by 1 to prevent using current value)
     df['temp_mean_24h'] = df['temp'].shift(1).rolling(24, min_periods=1).mean()
     df['temp_mean_168h'] = df['temp'].shift(1).rolling(168, min_periods=1).mean()
     df['temp_std_24h'] = df['temp'].shift(1).rolling(24, min_periods=1).std()
@@ -109,7 +122,6 @@ def create_features(df):
     
     return df
 
-
 def prepare_splits(all_data):
     """
     Split data into train, val, and test sets.
@@ -121,18 +133,13 @@ def prepare_splits(all_data):
     test_df = all_data[(all_data.index >= CONFIG['test_start']) &
                        (all_data.index <= CONFIG['test_end'])].copy()
     
-    # Create features for each split
-    print("  Creating features for training set...")
-    train_df = create_features(train_df)
-    
-    print("  Creating features for validation set...")
-    val_df = create_features(val_df)
-    
-    print("  Creating features for test set...")
-    test_df = create_features(test_df)
+    # Then create features for each split
+    print("  Creating features for each split...")
+    train_df = create_features(train_df)  # No previous data for training
+    val_df = create_features(val_df, previous_data=train_df)
+    test_df = create_features(test_df, previous_data=pd.concat([train_df, val_df]))
     
     return train_df, val_df, test_df
-
 
 def train_ridge(X_train, y_train, X_val, y_val):
     """Train Ridge with hyperparameter tuning"""
@@ -165,7 +172,6 @@ def train_ridge(X_train, y_train, X_val, y_val):
     
     return ridge_model
 
-
 def train_lightgbm(X_train, y_train, X_val, y_val):
     """Train LightGBM"""
     print("\nLightGBM:")
@@ -194,7 +200,6 @@ def train_lightgbm(X_train, y_train, X_val, y_val):
     print(f"  Validation MAE: {val_mae:.3f}°C")
     
     return lgb_model
-
 
 def create_visualizations(test_clean, ridge_preds, lgb_preds, baseline_preds):
     """Create comprehensive visualizations"""
@@ -273,7 +278,6 @@ def create_visualizations(test_clean, ridge_preds, lgb_preds, baseline_preds):
     print("  Saved: test_results.png")
     plt.close()
 
-
 def write_test_results_md(
     baseline_mae,
     baseline_rmse,
@@ -288,12 +292,13 @@ def write_test_results_md(
 ):
     """Write a concise markdown summary of test results."""
     lines = [
-        f"# Test Results ({_range_label(CONFIG['test_start'], CONFIG['test_end'])})",
+        f"# Test Results",
         "",
-        f"- Baseline — MAE: {baseline_mae:.2f}°C, RMSE: {baseline_rmse:.2f}°C, R²: {baseline_r2:.3f}",
-        f"- Ridge — MAE: {ridge_mae:.2f}°C, RMSE: {ridge_rmse:.2f}°C, R²: {ridge_r2:.3f}",
-        f"- LightGBM — MAE: {lgb_mae:.2f}°C, RMSE: {lgb_rmse:.2f}°C, R²: {lgb_r2:.3f}",
-        f"- Best model: {best_model}",
+        f"- **Period**: {_range_label(CONFIG['test_start'], CONFIG['test_end'])}",
+        f"- **Baseline** — MAE: {baseline_mae:.2f}°C, RMSE: {baseline_rmse:.2f}°C, R²: {baseline_r2:.3f}",
+        f"- **Ridge** — MAE: {ridge_mae:.2f}°C, RMSE: {ridge_rmse:.2f}°C, R²: {ridge_r2:.3f}",
+        f"- **LightGBM** — MAE: {lgb_mae:.2f}°C, RMSE: {lgb_rmse:.2f}°C, R²: {lgb_r2:.3f}",
+        f"- **Best model**: {best_model}",
         "",
         "![Predictions and Errors](test_results.png)",
     ]
@@ -302,14 +307,13 @@ def write_test_results_md(
 
 
 def main():
-    print("="*70)
+    print("=" * 70)
     print("RDU AIRPORT TEMPERATURE PREDICTION")
-    print("="*70)
+    print("=" * 70)
     
     print("\n1. Data Loading")
     print("-" * 70)
     all_data = download_data()
-    # all_data = prepare_data(all_data)
     all_data = convert_to_datetime(all_data)
     print(f"Full data range: {all_data.index.min()} to {all_data.index.max()}")
     print(f"Total samples: {len(all_data)}")
@@ -325,8 +329,7 @@ def main():
     continuous_features = ['temp_lag_24h', 'temp_lag_48h', 'temp_lag_168h',
                           'temp_mean_24h', 'temp_mean_168h', 'temp_std_24h']
     
-    categorical_features = ([f'hour_{h}' for h in range(24)] + 
-                           [f'dow_{d}' for d in range(7)])
+    categorical_features = [f'hour_{h}' for h in range(24)] + [f'dow_{d}' for d in range(7)]
     
     all_features = continuous_features + categorical_features
     
@@ -427,7 +430,7 @@ def main():
     print(f"  Generated {len(ridge_preds)} predictions for each model")
     
     print("\n8. Test Set Evaluation")
-    print("="*70)
+    print("=" * 70)
     
     # Baseline metrics
     baseline_mae = mean_absolute_error(y_test, baseline_preds)
@@ -500,7 +503,6 @@ def main():
     print("  Saved: test_results.md")
     
     return ridge_model, lgb_model
-
 
 if __name__ == "__main__":
     models = main()

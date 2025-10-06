@@ -1,8 +1,9 @@
-# Test Results (Sep 17–30, 2025)
+# Test Results
 
-- Baseline — MAE: 2.01°C, RMSE: 2.45°C, R²: 0.575
-- Ridge — MAE: 1.77°C, RMSE: 2.19°C, R²: 0.661
-- LightGBM — MAE: 1.15°C, RMSE: 1.46°C, R²: 0.849
-- Best model: LightGBM
+- **Period**: Sep 17–30, 2025
+- **Baseline** — MAE: 2.00°C, RMSE: 2.55°C, R²: 0.655
+- **Ridge** — MAE: 1.96°C, RMSE: 2.42°C, R²: 0.690
+- **LightGBM** — MAE: 1.37°C, RMSE: 1.82°C, R²: 0.825
+- **Best model**: LightGBM
 
 ![Predictions and Errors](test_results.png)
