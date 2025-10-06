@@ -30,15 +30,39 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
+# =====================
+# Global configuration
+# =====================
+CONFIG = {
+    'data_start': '2018-01-01 00:00',
+    'train_end': '2025-08-31 23:00',
+    'val_start': '2025-09-01 00:00',
+    'val_end': '2025-09-16 23:00',
+    'test_start': '2025-09-17 00:00',
+    'test_end': '2025-09-30 23:00',
+    'timezone': 'America/New_York',
+}
+
+
+def _range_label(start_str, end_str):
+    """Compact human label like "Sep 01–16, 2025" or cross-month/year if needed."""
+    s = datetime.fromisoformat(start_str)
+    e = datetime.fromisoformat(end_str)
+    if s.year == e.year and s.month == e.month:
+        return f"{s.strftime('%b %d')}–{e.strftime('%d, %Y')}"
+    if s.year == e.year:
+        return f"{s.strftime('%b %d')}–{e.strftime('%b %d, %Y')}"
+    return f"{s.strftime('%b %d, %Y')}–{e.strftime('%b %d, %Y')}"
+
 
 def download_data():
     """Download complete weather data including test period"""
     if not os.path.exists("rdu_weather_full.csv"):
-        start = datetime(2018, 1, 1, 0, 0)
-        end = datetime(2025, 9, 30, 23, 59)
+        start = datetime.fromisoformat(CONFIG['data_start'])
+        end = datetime.fromisoformat(CONFIG['test_end'])
         
         print("Downloading RDU weather data...")
-        data = Hourly('72306', start, end, timezone="America/New_York")
+        data = Hourly('72306', start, end, timezone=CONFIG['timezone'])
         data = data.fetch()
         
         data.to_csv("rdu_weather_full.csv", index=True)
@@ -52,7 +76,7 @@ def download_data():
 def convert_to_datetime(df):
     """Convert index to timezone-aware datetime in America/New_York"""
     dt_index = pd.to_datetime(df.index, utc=True, errors='raise')
-    df.index = dt_index.tz_convert("America/New_York")
+    df.index = dt_index.tz_convert(CONFIG['timezone'])
     return df
 
 def create_features(df):
@@ -91,10 +115,11 @@ def prepare_splits(all_data):
     Split data into train, val, and test sets.
     """
     # Split the raw data first
-    train_df = all_data[all_data.index < '2025-09-01'].copy()
-    val_df = all_data[(all_data.index >= '2025-09-01') & 
-                      (all_data.index < '2025-09-17')].copy()
-    test_df = all_data[all_data.index >= '2025-09-17'].copy()
+    train_df = all_data[all_data.index <= CONFIG['train_end']].copy()
+    val_df = all_data[(all_data.index >= CONFIG['val_start']) & 
+                      (all_data.index <= CONFIG['val_end'])].copy()
+    test_df = all_data[(all_data.index >= CONFIG['test_start']) &
+                       (all_data.index <= CONFIG['test_end'])].copy()
     
     # Create features for each split
     print("  Creating features for training set...")
@@ -206,7 +231,7 @@ def create_visualizations(test_clean, ridge_preds, lgb_preds, baseline_preds):
             color='#E63946', linestyle='-.', linewidth=2, alpha=0.8)
     ax.set_xlabel('Days', fontweight='bold', fontsize=11)
     ax.set_ylabel('Temperature (°C)', fontweight='bold', fontsize=11)
-    ax.set_title('14-Day Forecast (Sept 17-30, 2025)', fontweight='bold', fontsize=12)
+    ax.set_title(f"Forecast ({_range_label(CONFIG['test_start'], CONFIG['test_end'])})", fontweight='bold', fontsize=12)
     ax.legend(loc='best', framealpha=0.9)
     ax.grid(True, alpha=0.3)
     
@@ -247,6 +272,33 @@ def create_visualizations(test_clean, ridge_preds, lgb_preds, baseline_preds):
     plt.savefig('test_results.png', dpi=300, bbox_inches='tight')
     print("  Saved: test_results.png")
     plt.close()
+
+
+def write_test_results_md(
+    baseline_mae,
+    baseline_rmse,
+    baseline_r2,
+    ridge_mae,
+    ridge_rmse,
+    ridge_r2,
+    lgb_mae,
+    lgb_rmse,
+    lgb_r2,
+    best_model
+):
+    """Write a concise markdown summary of test results."""
+    lines = [
+        f"# Test Results ({_range_label(CONFIG['test_start'], CONFIG['test_end'])})",
+        "",
+        f"- Baseline — MAE: {baseline_mae:.2f}°C, RMSE: {baseline_rmse:.2f}°C, R²: {baseline_r2:.3f}",
+        f"- Ridge — MAE: {ridge_mae:.2f}°C, RMSE: {ridge_rmse:.2f}°C, R²: {ridge_r2:.3f}",
+        f"- LightGBM — MAE: {lgb_mae:.2f}°C, RMSE: {lgb_rmse:.2f}°C, R²: {lgb_r2:.3f}",
+        f"- Best model: {best_model}",
+        "",
+        "![Predictions and Errors](test_results.png)",
+    ]
+    with open("test_results.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
 
 def main():
@@ -299,15 +351,15 @@ def main():
     # Prepare continuous and categorical separately
     X_train_cont = train_clean[continuous_features].values
     X_train_cat = train_clean[categorical_features].values
-    y_train = train_clean['temp'].values
+    y_train = train_clean['temp'].to_numpy(dtype=np.float32)
     
     X_val_cont = val_clean[continuous_features].values
     X_val_cat = val_clean[categorical_features].values
-    y_val = val_clean['temp'].values
+    y_val = val_clean['temp'].to_numpy(dtype=np.float32)
     
     X_test_cont = test_clean[continuous_features].values
     X_test_cat = test_clean[categorical_features].values
-    y_test = test_clean['temp'].values
+    y_test = test_clean['temp'].to_numpy(dtype=np.float32)
     
     print("\n4. Feature Scaling (Fit on training data only)")
     print("-" * 70)
@@ -344,7 +396,7 @@ def main():
     
     X_comb_cont = combined_clean[continuous_features].values
     X_comb_cat = combined_clean[categorical_features].values
-    y_comb = combined_clean['temp'].values
+    y_comb = combined_clean['temp'].to_numpy(dtype=np.float32)
     
     # Re-fit scaler on combined data
     scaler_final = StandardScaler()
@@ -409,8 +461,9 @@ def main():
     print(f"  RMSE: {lgb_rmse:.3f}°C")
     print(f"  R²:   {lgb_r2:.3f}")
     
-    print(f"\nBest Model: {'LightGBM' if lgb_mae < ridge_mae else 'Ridge'}")
-    if lgb_mae < ridge_mae:
+    best_model = 'LightGBM' if lgb_mae < ridge_mae else 'Ridge'
+    print(f"\nBest Model: {best_model}")
+    if best_model == 'LightGBM':
         imp = ((ridge_mae - lgb_mae) / ridge_mae) * 100
         print(f"  LightGBM is {imp:.1f}% better than Ridge")
     
@@ -430,6 +483,21 @@ def main():
     })
     results.to_csv('predictions_sept17-30.csv', index=False)
     print("  Saved: predictions_sept17-30.csv")
+    
+    # Write concise markdown summary
+    write_test_results_md(
+        baseline_mae,
+        baseline_rmse,
+        baseline_r2,
+        ridge_mae,
+        ridge_rmse,
+        ridge_r2,
+        lgb_mae,
+        lgb_rmse,
+        lgb_r2,
+        best_model,
+    )
+    print("  Saved: test_results.md")
     
     return ridge_model, lgb_model
 
