@@ -1,3 +1,29 @@
+## Insights from EDA
+
+Top correlations by lag:
+- 1h: 0.990
+- 2h: 0.969
+- 3h: 0.939
+- 24h: 0.889
+- 6h: 0.831
+- 48h: 0.808
+- 72h: 0.777
+- 96h: 0.763
+- 120h: 0.754
+- 144h: 0.748
+
+Our chosen lags performance:
+- Daily (24h): 0.889 (rank 4)
+- Two-day (48h): 0.808 (rank 6)
+- Weekly (168h): 0.746 (rank 11)
+
+Implications for Feature Engineering
+- Multicollinearity risk: The extremely high correlations at 1-3 hour lags (0.990-0.939) would create severe multicollinearity in linear models like Ridge regression
+- Interpretability: While 1 hour lags are strong, "temperature from one hour ago" provides limited actual insights compared to "yesterday's temperature at this same hour"
+
+
+---
+
 ## Run 2
 
 - **Period**: Sep 17–30, 2025
