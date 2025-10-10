@@ -83,7 +83,7 @@ it as a feature here. This will likely be okay though, since according to The Ch
 
 ### Total Sunshine
 
-The `tsun` feature is also blank. Contrary to popular believe, this does *not* report tsunamis. This is actually the
+The `tsun` feature is also blank. Contrary to popular belief, this does *not* report tsunamis. This is actually the
 total amount of sunshine for the hour. The weather station here likely just doesn't capture it.
 
 ### Wind Speed and Wind Gusts
