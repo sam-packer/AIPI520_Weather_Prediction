@@ -127,11 +127,6 @@ def feature_engineering(X_train, X_test, y):
         df = df.copy()
         df['hour'] = df.index.hour
         df['month'] = df.index.month
-        for lag in [1, 3, 6, 12, 24]:
-            df[f'temp_lag_{lag}'] = df['temp'].shift(lag)
-            df[f'temp_lag_{lag}'] = df['temp'].shift(lag)
-
-        df['temp_rolling_6h'] = df['temp'].rolling(window=6).mean()
         df = df.dropna().copy()
         return df
 
@@ -139,36 +134,30 @@ def feature_engineering(X_train, X_test, y):
     X_test = _engineer(X_test)
     y = _engineer(y)
 
-    numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres", "temp_rolling_6h"]
+    numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres"]
     categorical_features = ["month", "hour", "coco"]
-    for lag in [1, 3, 6, 12, 24]:
-        numeric_features.append(f"temp_lag_{lag}")
 
     preprocessor = ColumnTransformer(
         transformers=[
             ("num", StandardScaler(), numeric_features),
             ("col", OneHotEncoder(handle_unknown='ignore'), categorical_features)
-        ]
+        ], remainder='drop'
     )
     print("Done engineering features. Hopefully they're good.")
     return X_train, X_test, y, preprocessor
 
 
-def train_model(models, X_train, X_test, y, preprocessor):
+def train_and_select_models(models, X_train, preprocessor):
     print("Training models...")
 
     tscv = TimeSeriesSplit(n_splits=10, gap=168)
     results = {}
 
     y_train = X_train['temp']
-    y_test = X_test['temp']
     X_train = X_train.drop(columns="temp")
-    X_test = X_test.drop(columns="temp")
 
     for name, model in models.items():
         print("Training", name)
-
-        print("Columns being passed to preprocessor:", X_train.columns.tolist())
 
         mean_mse = []
         mean_r2 = []
@@ -183,7 +172,7 @@ def train_model(models, X_train, X_test, y, preprocessor):
 
             pipeline.fit(X_train_sub, y_train_sub)
 
-            # print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
+            #print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
 
             val_prede = pipeline.predict(X_val)
 
@@ -194,12 +183,42 @@ def train_model(models, X_train, X_test, y, preprocessor):
 
         mean_mse = np.mean(mean_mse)
         mean_r2 = np.mean(mean_r2)
-        results[name] = {"MSE:": mean_mse, "R2:": mean_r2}
+        results[name] = {"cv_mse": mean_mse, "cv_r2": mean_r2, "model": model}
         print(f"{name} model performance:")
         print(f"MSE average across all folds: {mean_mse}")
         print(f"R2 average across all folds: {mean_r2}")
 
     return results
+
+def evaluate_final_models(results, X_train, X_test, preprocessor):
+    y_train = X_train['temp']
+    y_test = X_test['temp']
+    X_train = X_train.drop(columns="temp")
+    X_test = X_test.drop(columns="temp")
+
+    final_results = {}
+    # Select the top two models for the assignment
+    # AI Disclosure: ChatGPT helped write the code to sort the models from the dictionary
+    sorted_models = sorted(results.items(), key=lambda kv: kv[1]["cv_mse"])
+    top_two = sorted_models[:2]
+
+    for name, info in top_two:
+        print("Doing final training on", name, "using test data and final 2 week prediction")
+        pipeline = Pipeline([
+            ("preprocessor", preprocessor),
+            ("model", info['model'])
+        ])
+        pipeline.fit(X_train, y_train)
+        y_preds = pipeline.predict(X_test)
+
+        mse = mean_squared_error(y_test, y_preds)
+        r2 = r2_score(y_test, y_preds)
+        final_results[name] = {"test_mse": mse, "test_r2": r2}
+        print(f"{name} model performance:")
+        print(f"MSE average on test set: {mse}")
+        print(f"R2 average on test: {r2}")
+
+    return final_results
 
 
 def main():
@@ -214,7 +233,8 @@ def main():
         "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1)
     }
 
-    results = train_model(models, X_train, X_test, y, preprocessor)
+    model_results = train_and_select_models(models, X_train, preprocessor)
+    final_results = evaluate_final_models(model_results, X_train, X_test, preprocessor)
 
 
 if __name__ == "__main__":
