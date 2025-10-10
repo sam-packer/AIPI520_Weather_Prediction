@@ -83,7 +83,7 @@ it as a feature here. This will likely be okay though, since according to The Ch
 
 ### Total Sunshine
 
-The `tsun` feature is also blank. Contrary to popular believe, this does *not* report tsunamis. This is actually the
+The `tsun` feature is also blank. Contrary to popular belief, this does *not* report tsunamis. This is actually the
 total amount of sunshine for the hour. The weather station here likely just doesn't capture it.
 
 ### Wind Speed and Wind Gusts
@@ -94,6 +94,36 @@ not report wind gusts unless it's sustained and much higher than the regular win
 capturing. We have a few options: filling it or turning it into a binary feature. If we fill the gust with the wind
 speed, it would teach the model about steadiness. We could also simply say that if there was a gust, then the
 `gust_flag` is 1, otherwise it's 0. This assigns it meaning in that the hour was more windy than usual.
+
+### Wind Direction
+
+The wind direction is in degrees. However, there's a few considerations. 0° and 360° are the same. But worse, going from
+359° to 1° is actually only a 2° change! It's not a 358° difference, which we need to be explicit about. We actually
+need to use linear interpolation here. Remember trigonometry? Me neither, thankfully I still had my precalculus lecture
+videos saved from forever ago (2021 does NOT feel like 4 years ago). The idea with linear interpolation is that we can
+represent any angle on the unit circle as $(\cos\theta, \sin\theta)$. Here's what this actually means in practice:
+
+- $359^{\circ} = (\cos(359^{\circ}), \sin(359^{\circ})) = (0.999, -0.017)$
+- $1^{\circ} = (\cos(1^{\circ}), \sin(1^{\circ})) = (0.999,0.017)$
+
+Yes, I did have to redo the calculations as, even all these years later, I still forgot to set my calculator to degree
+from radian mode. Some things never change. However, the point is that these numbers are very close to each other in
+terms of (x, y) so interpolation is how I choose to do it. Then, you can use arctangent to convert the points back to an
+angle.
+
+### Pressure
+
+Less than 1% of our data is missing the pressure. However, it tends to be a smooth number that changes. So, we
+interpolate, then forward and backfill for our imputation strategy. Basically, imagine you have `1013, NaN, 1015`. It
+will replace NaN with 1014. No humor in this one, sorry. This is just a technicality in the details.
+
+Here's what it would look like with just back/forward filling:
+- `1013, NaN, NaN, 1016` --> `1013, 1013, 1016, 1016`
+
+This is why interpolating is important. By interpolating before back/forward filling, we get this instead:
+- `1013, NaN, NaN, 1016` --> `1013, 1014, 1015, 1016`
+
+This is the ideal strategy here since pressure tends to be smooth and continuous.
 
 ### Precipitation Total
 

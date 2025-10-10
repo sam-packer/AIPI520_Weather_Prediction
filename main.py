@@ -2,6 +2,15 @@ from datetime import datetime
 from meteostat import Hourly
 import os
 import pandas as pd
+import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+
 
 def download_data():
     # Let us be good people and not hammer their API if we already have the data
@@ -9,7 +18,7 @@ def download_data():
         # TODO: Figure out how much data we should actually use.
         # Linear regression would actually probably benefit from learning from less historical data
         # A more advanced model might not
-        X_start = datetime(2018, 1, 1)
+        X_start = datetime(2018, 7, 20)
         X_end = datetime(2025, 9, 16, 23, 59)
         y_start = datetime(2025, 9, 17)
         y_end = datetime(2025, 9, 30, 23, 59)
@@ -31,17 +40,201 @@ def download_data():
 
 
 def prepare_data(X, y):
+    print("Preparing the data...")
     for df in [X, y]:
         # Meteostat is really sneaky and actually uses UTC by default...
         # This converts it to Eastern Time. Good thing I read the documentation before doing anything else. Ha ha.
         df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
 
+        # We'll validate the data very early on to ensure there's no impossible values
+        # AI Disclosure: ChatGPT was used to help make this final code work
+        rules = {'temp': (-40, 50),
+                 'rhum': (0, 100),
+                 'wspd': (0, None),
+                 'wpgt': (0, None),
+                 'wdir': (0, 360),
+                 'prcp': (0, None)}
+        violations = {}
+        for col, (low, high) in rules.items():
+            mask = pd.Series(False, index=df.index)
+            if low is not None:
+                mask |= df[col] < low
+            if high is not None:
+                mask |= df[col] > high
+            if mask.any():
+                violations[col] = df[mask]
+        print("Looking for impossible values:", violations)
+
+    # Make sure we don't accidentally fetch the same dates for training and prediction data
+    assert X.index.max() < y.index.min(), "Training and prediction periods overlap!"
+    print("Done with data preparation.")
     return X, y
+
+
+def impute_data(X, y):
+    print("Imputing data...")
+
+    def _clean(df):
+        df = df.copy()
+        # Drop snow and tsun. They have no data.
+        df = df.drop(columns=['snow', 'tsun'])
+        # Turn wind gust into a flag rather than a value since it's missing most of the time
+        df['gust_flag'] = df['wpgt'].notna().astype(int)
+        # Fill the gusts with regular speed so it learns a baseline
+        df['wpgt'] = df['wpgt'].fillna(df['wspd'])
+        # Forward fill. Take the last known value and fill it in when it's missing
+        df['prcp'] = df['prcp'].ffill().fillna(0)
+        # Linearly interpolate pressure since less than 1% is even missing and it's continuous
+        df['pres'] = df['pres'].interpolate().ffill().bfill()
+        # We're only training on July 20, 2018+, so in theory the weather code should always exist
+        df['coco_missing'] = df['coco'].isna().astype(int)
+        # Things never go the way you want them to though...
+        df['coco'] = df['coco'].fillna(-1)
+        # See the Wind Direction under the README for this. The code below is doing what's stated in the README
+        # AI Disclosure: ChatGPT was used to produce the imputation code below for wind speed
+        df['wdir'] = np.degrees(np.angle(np.interp(df.index, df.index[~df['wdir'].isna()],
+                                                   np.exp(1j * np.radians(df['wdir'][~df['wdir'].isna()]))))) % 360
+        return df
+
+    X = _clean(X)
+    y = _clean(y)
+    print("Done. Verification there are no missing values:")
+    X_missing_summary = X.isna().mean().sort_values(ascending=False)
+    y_missing_summary = y.isna().mean().sort_values(ascending=False)
+    print(X_missing_summary)
+    print(y_missing_summary)
+    # AI Disclosure: ChatGPT helped me figure out you need sum() here twice for this test
+    assert X.isna().sum().sum() == 0, "X still has missing values after imputation!"
+    assert y.isna().sum().sum() == 0, "y still has missing values after imputation!"
+    return X, y
+
+
+def split_data(X):
+    print("Creating train / test data...")
+    cutoff_date = X.index.max() - pd.Timedelta(days=367)
+    X_train = X[X.index <= cutoff_date]
+    X_test = X[X.index > cutoff_date]
+
+    print(f"Train:\t {X_train.index.min()} to {X_train.index.max()} ({len(X_train)} rows)")
+    print(f"Test:\t {X_test.index.min()} to {X_test.index.max()} ({len(X_test)} rows)")
+    return X_train, X_test
+
+
+def feature_engineering(X_train, X_test, y):
+    print("Engineering features...")
+
+    def _engineer(df):
+        df = df.copy()
+        df['hour'] = df.index.hour
+        df['month'] = df.index.month
+        df = df.dropna().copy()
+        return df
+
+    X_train = _engineer(X_train)
+    X_test = _engineer(X_test)
+    y = _engineer(y)
+
+    numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres"]
+    categorical_features = ["month", "hour", "coco"]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), numeric_features),
+            ("col", OneHotEncoder(handle_unknown='ignore'), categorical_features)
+        ], remainder='drop'
+    )
+    print("Done engineering features. Hopefully they're good.")
+    return X_train, X_test, y, preprocessor
+
+
+def train_and_select_models(models, X_train, preprocessor):
+    print("Training models...")
+
+    tscv = TimeSeriesSplit(n_splits=10, gap=168)
+    results = {}
+
+    y_train = X_train['temp']
+    X_train = X_train.drop(columns="temp")
+
+    for name, model in models.items():
+        print("Training", name)
+
+        mean_mse = []
+        mean_r2 = []
+        for train_idx, test_idx in tscv.split(X_train, y_train):
+            X_train_sub, X_val = X_train.iloc[train_idx], X_train.iloc[test_idx]
+            y_train_sub, y_val = y_train.iloc[train_idx], y_train.iloc[test_idx]
+
+            pipeline = Pipeline(steps=[
+                ("preprocessor", preprocessor),
+                ("model", model)
+            ])
+
+            pipeline.fit(X_train_sub, y_train_sub)
+
+            #print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
+
+            val_prede = pipeline.predict(X_val)
+
+            mse = mean_squared_error(y_val, val_prede)
+            r2 = r2_score(y_val, val_prede)
+            mean_mse.append(mse)
+            mean_r2.append(r2)
+
+        mean_mse = np.mean(mean_mse)
+        mean_r2 = np.mean(mean_r2)
+        results[name] = {"cv_mse": mean_mse, "cv_r2": mean_r2, "model": model}
+        print(f"{name} model performance:")
+        print(f"MSE average across all folds: {mean_mse}")
+        print(f"R2 average across all folds: {mean_r2}")
+
+    return results
+
+def evaluate_final_models(results, X_train, X_test, preprocessor):
+    y_train = X_train['temp']
+    y_test = X_test['temp']
+    X_train = X_train.drop(columns="temp")
+    X_test = X_test.drop(columns="temp")
+
+    final_results = {}
+    # Select the top two models for the assignment
+    # AI Disclosure: ChatGPT helped write the code to sort the models from the dictionary
+    sorted_models = sorted(results.items(), key=lambda kv: kv[1]["cv_mse"])
+    top_two = sorted_models[:2]
+
+    for name, info in top_two:
+        print("Doing final training on", name, "using test data and final 2 week prediction")
+        pipeline = Pipeline([
+            ("preprocessor", preprocessor),
+            ("model", info['model'])
+        ])
+        pipeline.fit(X_train, y_train)
+        y_preds = pipeline.predict(X_test)
+
+        mse = mean_squared_error(y_test, y_preds)
+        r2 = r2_score(y_test, y_preds)
+        final_results[name] = {"test_mse": mse, "test_r2": r2}
+        print(f"{name} model performance:")
+        print(f"MSE average on test set: {mse}")
+        print(f"R2 average on test: {r2}")
+
+    return final_results
+
 
 def main():
     X, y = download_data()
     X, y = prepare_data(X, y)
+    X, y = impute_data(X, y)
+    X_train, X_test = split_data(X)
+    X_train, X_test, y, preprocessor = feature_engineering(X_train, X_test, y)
+    models = {
+        "Linear Regression": LinearRegression(),
+        "Ridge": Ridge(alpha=1.0),
+        "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1)
+    }
 
+    model_results = train_and_select_models(models, X_train, preprocessor)
+    final_results = evaluate_final_models(model_results, X_train, X_test, preprocessor)
 
 
 if __name__ == "__main__":
