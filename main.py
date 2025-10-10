@@ -7,6 +7,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
@@ -108,21 +109,6 @@ def impute_data(X, y):
     return X, y
 
 
-def add_temporal_features(df):
-    df = df.copy()
-    df["hour"] = df.index.hour
-    df["month"] = df.index.month
-
-    # Lags and rolling computed BEFORE split
-    for lag in [1, 3, 6, 12, 24]:
-        df[f"temp_lag_{lag}"] = df["temp"].shift(lag)
-    df["temp_rolling_6h"] = df["temp"].rolling(window=6).mean()
-
-    # Drop NaNs created by lag/rolling
-    df = df.dropna().copy()
-    return df
-
-
 def split_data(X):
     print("Creating train / test data...")
     cutoff_date = X.index.max() - pd.Timedelta(days=367)
@@ -161,7 +147,7 @@ def feature_engineering(X_train, X_test, y):
     preprocessor = ColumnTransformer(
         transformers=[
             ("num", StandardScaler(), numeric_features),
-            ("col", OneHotEncoder(), categorical_features)
+            ("col", OneHotEncoder(handle_unknown='ignore'), categorical_features)
         ]
     )
     print("Done engineering features. Hopefully they're good.")
@@ -170,6 +156,8 @@ def feature_engineering(X_train, X_test, y):
 
 def train_model(models, X_train, X_test, y, preprocessor):
     print("Training models...")
+
+    tscv = TimeSeriesSplit(n_splits=10, gap=168)
     results = {}
 
     y_train = X_train['temp']
@@ -182,23 +170,34 @@ def train_model(models, X_train, X_test, y, preprocessor):
 
         print("Columns being passed to preprocessor:", X_train.columns.tolist())
 
-        pipeline = Pipeline(steps=[
-            ("preprocessor", preprocessor),
-            ("model", model)
-        ])
+        mean_mse = []
+        mean_r2 = []
+        for train_idx, test_idx in tscv.split(X_train, y_train):
+            X_train_sub, X_val = X_train.iloc[train_idx], X_train.iloc[test_idx]
+            y_train_sub, y_val = y_train.iloc[train_idx], y_train.iloc[test_idx]
 
-        pipeline.fit(X_train, y_train)
+            pipeline = Pipeline(steps=[
+                ("preprocessor", preprocessor),
+                ("model", model)
+            ])
 
-        # print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
+            pipeline.fit(X_train_sub, y_train_sub)
 
-        test_preds = pipeline.predict(X_test)
+            # print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
 
-        mse = mean_squared_error(y_test, test_preds)
-        r2 = r2_score(y_test, test_preds)
-        results[name] = {"MSE:": mse, "R2:": r2}
+            val_prede = pipeline.predict(X_val)
+
+            mse = mean_squared_error(y_val, val_prede)
+            r2 = r2_score(y_val, val_prede)
+            mean_mse.append(mse)
+            mean_r2.append(r2)
+
+        mean_mse = np.mean(mean_mse)
+        mean_r2 = np.mean(mean_r2)
+        results[name] = {"MSE:": mean_mse, "R2:": mean_r2}
         print(f"{name} model performance:")
-        print(f"MSE: {mse}")
-        print(f"R2: {r2}")
+        print(f"MSE average across all folds: {mean_mse}")
+        print(f"R2 average across all folds: {mean_r2}")
 
     return results
 
