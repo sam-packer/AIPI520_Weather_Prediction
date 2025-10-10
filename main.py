@@ -3,6 +3,12 @@ from meteostat import Hourly
 import os
 import pandas as pd
 import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 
 def download_data():
@@ -102,10 +108,114 @@ def impute_data(X, y):
     return X, y
 
 
+def add_temporal_features(df):
+    df = df.copy()
+    df["hour"] = df.index.hour
+    df["month"] = df.index.month
+
+    # Lags and rolling computed BEFORE split
+    for lag in [1, 3, 6, 12, 24]:
+        df[f"temp_lag_{lag}"] = df["temp"].shift(lag)
+    df["temp_rolling_6h"] = df["temp"].rolling(window=6).mean()
+
+    # Drop NaNs created by lag/rolling
+    df = df.dropna().copy()
+    return df
+
+
+def split_data(X):
+    print("Creating train / test data...")
+    cutoff_date = X.index.max() - pd.Timedelta(days=367)
+    X_train = X[X.index <= cutoff_date]
+    X_test = X[X.index > cutoff_date]
+
+    print(f"Train:\t {X_train.index.min()} to {X_train.index.max()} ({len(X_train)} rows)")
+    print(f"Test:\t {X_test.index.min()} to {X_test.index.max()} ({len(X_test)} rows)")
+    return X_train, X_test
+
+
+def feature_engineering(X_train, X_test, y):
+    print("Engineering features...")
+
+    def _engineer(df):
+        df = df.copy()
+        df['hour'] = df.index.hour
+        df['month'] = df.index.month
+        for lag in [1, 3, 6, 12, 24]:
+            df[f'temp_lag_{lag}'] = df['temp'].shift(lag)
+            df[f'temp_lag_{lag}'] = df['temp'].shift(lag)
+
+        df['temp_rolling_6h'] = df['temp'].rolling(window=6).mean()
+        df = df.dropna().copy()
+        return df
+
+    X_train = _engineer(X_train)
+    X_test = _engineer(X_test)
+    y = _engineer(y)
+
+    numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres", "temp_rolling_6h"]
+    categorical_features = ["month", "hour", "coco"]
+    for lag in [1, 3, 6, 12, 24]:
+        numeric_features.append(f"temp_lag_{lag}")
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", StandardScaler(), numeric_features),
+            ("col", OneHotEncoder(), categorical_features)
+        ]
+    )
+    print("Done engineering features. Hopefully they're good.")
+    return X_train, X_test, y, preprocessor
+
+
+def train_model(models, X_train, X_test, y, preprocessor):
+    print("Training models...")
+    results = {}
+
+    y_train = X_train['temp']
+    y_test = X_test['temp']
+    X_train = X_train.drop(columns="temp")
+    X_test = X_test.drop(columns="temp")
+
+    for name, model in models.items():
+        print("Training", name)
+
+        print("Columns being passed to preprocessor:", X_train.columns.tolist())
+
+        pipeline = Pipeline(steps=[
+            ("preprocessor", preprocessor),
+            ("model", model)
+        ])
+
+        pipeline.fit(X_train, y_train)
+
+        # print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
+
+        test_preds = pipeline.predict(X_test)
+
+        mse = mean_squared_error(y_test, test_preds)
+        r2 = r2_score(y_test, test_preds)
+        results[name] = {"MSE:": mse, "R2:": r2}
+        print(f"{name} model performance:")
+        print(f"MSE: {mse}")
+        print(f"R2: {r2}")
+
+    return results
+
+
 def main():
     X, y = download_data()
     X, y = prepare_data(X, y)
     X, y = impute_data(X, y)
+    X_train, X_test = split_data(X)
+    X_train, X_test, y, preprocessor = feature_engineering(X_train, X_test, y)
+    models = {
+        "Linear Regression": LinearRegression(),
+        "Ridge": Ridge(alpha=1.0),
+        "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1)
+    }
+
+    results = train_model(models, X_train, X_test, y, preprocessor)
 
 
 if __name__ == "__main__":
