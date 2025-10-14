@@ -126,6 +126,7 @@ def feature_engineering(X_train, X_test, y):
         df = df.copy()
         df['hour'] = df.index.hour
         df['month'] = df.index.month
+        df['day_of_week'] = df.index.dayofweek
         df = df.dropna().copy()
         return df
 
@@ -134,7 +135,7 @@ def feature_engineering(X_train, X_test, y):
     y = _engineer(y)
 
     numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres"]
-    categorical_features = ["month", "hour", "coco"]
+    categorical_features = ["month", "hour", "day_of_week", "coco"]
 
     preprocessor = ColumnTransformer(
         transformers=[
@@ -175,8 +176,8 @@ def train_and_select_models(models, X_train, X_val, preprocessor):
 
         results[name] = {"val_mae": mae, "val_r2": r2, "model": model}
         print(f"{name} model performance:")
-        print(f"MAE on validation set: {mae}")
-        print(f"R2 on validation set: {r2}")
+        print(f"MAE on validation set: {mae:.2f}")
+        print(f"R2 on validation set: {r2:.3f}")
 
     return results
 
@@ -192,12 +193,17 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     sorted_models = sorted(results.items(), key=lambda kv: kv[1]["val_mae"])
     top_two = sorted_models[:2]
 
+    print("\nTop 2 models based on validation performance:")
+    for i, (name, info) in enumerate(top_two, 1):
+        print(f"{i}. {name} (Validation MAE: {info['val_mae']:.2f})")
+
     y_forecast = y.copy()
     y_forecast['hour'] = y_forecast.index.hour
     y_forecast['month'] = y_forecast.index.month
+    y_forecast['day_of_week'] = y_forecast.index.dayofweek
 
     for name, info in top_two:
-        print("Doing final training on", name, "using tested model and final 2 week prediction")
+        print(f"\nDoing final training on {name} using tested model and final 2 week prediction")
         pipeline = Pipeline([
             ("preprocessor", preprocessor),
             ("model", info['model'])
@@ -228,10 +234,22 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
 
         final_results[name] = {"test_mae": mae, "test_r2": r2}
         print(f"{name} model performance:")
-        print(f"MAE average on test set: {mae}")
-        print(f"R2 average on test: {r2}")
+        print(f"MAE average on test set: {mae:.2f}")
+        print(f"R2 average on test: {r2:.3f}")
 
         y_forecast.to_csv(f"forecast_{name.replace(' ', '_').lower()}.csv")
+
+    print("\n" + "="*60)
+    print("RESULTS SUMMARY")
+    print("="*60)
+    print(f"{'Model':<25} {'Val MAE':>10} {'Test MAE':>10} {'Test R2':>10}")
+    print("-"*60)
+    for name in [m[0] for m in top_two]:
+        val_mae = results[name]['val_mae']
+        test_mae = final_results[name]['test_mae']
+        test_r2 = final_results[name]['test_r2']
+        print(f"{name:<25} {val_mae:>10.2f} {test_mae:>10.2f} {test_r2:>10.3f}")
+    print("="*60)
 
     return final_results
 
