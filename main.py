@@ -5,8 +5,8 @@ import pandas as pd
 import numpy as np
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression, Ridge, ElasticNet
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.linear_model import LinearRegression, ElasticNet
+from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
@@ -159,9 +159,6 @@ def train_and_select_models(models, X_train, X_val, preprocessor):
     for name, model in models.items():
         print("Training", name)
 
-        mean_mse = []
-        mean_r2 = []
-
         pipeline = Pipeline(steps=[
             ("preprocessor", preprocessor),
             ("model", model)
@@ -173,17 +170,13 @@ def train_and_select_models(models, X_train, X_val, preprocessor):
 
         val_prede = pipeline.predict(X_val)
 
-        mse = mean_squared_error(y_val, val_prede)
+        mae = mean_absolute_error(y_val, val_prede)
         r2 = r2_score(y_val, val_prede)
-        mean_mse.append(mse)
-        mean_r2.append(r2)
 
-        mean_mse = np.mean(mean_mse)
-        mean_r2 = np.mean(mean_r2)
-        results[name] = {"cv_mse": mean_mse, "cv_r2": mean_r2, "model": model}
+        results[name] = {"val_mae": mae, "val_r2": r2, "model": model}
         print(f"{name} model performance:")
-        print(f"MSE average across all folds: {mean_mse}")
-        print(f"R2 average across all folds: {mean_r2}")
+        print(f"MAE on validation set: {mae}")
+        print(f"R2 on validation set: {r2}")
 
     return results
 
@@ -196,11 +189,10 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     final_results = {}
     # Select the top two models for the assignment
     # AI Disclosure: ChatGPT helped write the code to sort the models from the dictionary
-    sorted_models = sorted(results.items(), key=lambda kv: kv[1]["cv_mse"])
+    sorted_models = sorted(results.items(), key=lambda kv: kv[1]["val_mae"])
     top_two = sorted_models[:2]
 
     y_forecast = y.copy()
-    y_forecast = y_forecast.copy()
     y_forecast['hour'] = y_forecast.index.hour
     y_forecast['month'] = y_forecast.index.month
 
@@ -229,14 +221,14 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
         y_forecast['predicted_temp'] = preds
 
         common_idx = y_forecast['temp'].notna()
-        mse = mean_squared_error(y_forecast.loc[common_idx, "temp"],
+        mae = mean_absolute_error(y_forecast.loc[common_idx, "temp"],
                                  y_forecast.loc[common_idx, "predicted_temp"])
         r2 = r2_score(y_forecast.loc[common_idx, "temp"],
                       y_forecast.loc[common_idx, "predicted_temp"])
 
-        final_results[name] = {"test_mse": mse, "test_r2": r2}
+        final_results[name] = {"test_mae": mae, "test_r2": r2}
         print(f"{name} model performance:")
-        print(f"MSE average on test set: {mse}")
+        print(f"MAE average on test set: {mae}")
         print(f"R2 average on test: {r2}")
 
         y_forecast.to_csv(f"forecast_{name.replace(' ', '_').lower()}.csv")
@@ -250,11 +242,12 @@ def main():
     X, y = impute_data(X, y)
     X_train, X_val = split_data(X)
     X_train, X_val, y, preprocessor = feature_engineering(X_train, X_val, y)
+    random_seed = 67
     models = {
         "Linear Regression": LinearRegression(),
-        "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1),
-        "Elastic Net": ElasticNet(alpha=0.001, l1_ratio=0.5, max_iter=5000),
-        "Gradient Boosting": GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=3)
+        "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1, random_state=random_seed),
+        "Elastic Net": ElasticNet(alpha=0.001, l1_ratio=0.5, max_iter=5000, random_state=random_seed),
+        "Gradient Boosting": GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=3, random_state=random_seed)
     }
 
     model_results = train_and_select_models(models, X_train, X_val, preprocessor)
