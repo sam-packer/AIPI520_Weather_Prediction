@@ -4,10 +4,9 @@ import os
 import pandas as pd
 import numpy as np
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression, Ridge, ElasticNet
 from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
@@ -111,13 +110,13 @@ def impute_data(X, y):
 
 def split_data(X):
     print("Creating train / test data...")
-    cutoff_date = X.index.max() - pd.Timedelta(days=367)
+    cutoff_date = X.index.max() - pd.Timedelta(days=90)
     X_train = X[X.index <= cutoff_date]
-    X_test = X[X.index > cutoff_date]
+    X_val = X[X.index > cutoff_date]
 
-    print(f"Train:\t {X_train.index.min()} to {X_train.index.max()} ({len(X_train)} rows)")
-    print(f"Test:\t {X_test.index.min()} to {X_test.index.max()} ({len(X_test)} rows)")
-    return X_train, X_test
+    print(f"Train:\t\t {X_train.index.min()} to {X_train.index.max()} ({len(X_train)} rows)")
+    print(f"Validation:\t {X_val.index.min()} to {X_val.index.max()} ({len(X_val)} rows)")
+    return X_train, X_val
 
 
 def feature_engineering(X_train, X_test, y):
@@ -147,39 +146,37 @@ def feature_engineering(X_train, X_test, y):
     return X_train, X_test, y, preprocessor
 
 
-def train_and_select_models(models, X_train, preprocessor):
+def train_and_select_models(models, X_train, X_val, preprocessor):
     print("Training models...")
 
-    tscv = TimeSeriesSplit(n_splits=10, gap=168)
     results = {}
 
     y_train = X_train['temp']
     X_train = X_train.drop(columns="temp")
+    y_val = X_val['temp']
+    X_val = X_val.drop(columns="temp")
 
     for name, model in models.items():
         print("Training", name)
 
         mean_mse = []
         mean_r2 = []
-        for train_idx, test_idx in tscv.split(X_train, y_train):
-            X_train_sub, X_val = X_train.iloc[train_idx], X_train.iloc[test_idx]
-            y_train_sub, y_val = y_train.iloc[train_idx], y_train.iloc[test_idx]
 
-            pipeline = Pipeline(steps=[
-                ("preprocessor", preprocessor),
-                ("model", model)
-            ])
+        pipeline = Pipeline(steps=[
+            ("preprocessor", preprocessor),
+            ("model", model)
+        ])
 
-            pipeline.fit(X_train_sub, y_train_sub)
+        pipeline.fit(X_train, y_train)
 
-            #print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
+        # print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
 
-            val_prede = pipeline.predict(X_val)
+        val_prede = pipeline.predict(X_val)
 
-            mse = mean_squared_error(y_val, val_prede)
-            r2 = r2_score(y_val, val_prede)
-            mean_mse.append(mse)
-            mean_r2.append(r2)
+        mse = mean_squared_error(y_val, val_prede)
+        r2 = r2_score(y_val, val_prede)
+        mean_mse.append(mse)
+        mean_r2.append(r2)
 
         mean_mse = np.mean(mean_mse)
         mean_r2 = np.mean(mean_r2)
@@ -190,11 +187,11 @@ def train_and_select_models(models, X_train, preprocessor):
 
     return results
 
-def evaluate_final_models(results, X_train, X_test, preprocessor):
-    y_train = X_train['temp']
-    y_test = X_test['temp']
-    X_train = X_train.drop(columns="temp")
-    X_test = X_test.drop(columns="temp")
+
+def evaluate_final_models(results, X_train, X_val, y, preprocessor):
+    X_full = pd.concat([X_train, X_val]).sort_index()
+    y_full = X_full['temp']
+    X_full = X_full.drop(columns="temp")
 
     final_results = {}
     # Select the top two models for the assignment
@@ -202,21 +199,47 @@ def evaluate_final_models(results, X_train, X_test, preprocessor):
     sorted_models = sorted(results.items(), key=lambda kv: kv[1]["cv_mse"])
     top_two = sorted_models[:2]
 
+    y_forecast = y.copy()
+    y_forecast = y_forecast.copy()
+    y_forecast['hour'] = y_forecast.index.hour
+    y_forecast['month'] = y_forecast.index.month
+
     for name, info in top_two:
-        print("Doing final training on", name, "using test data and final 2 week prediction")
+        print("Doing final training on", name, "using tested model and final 2 week prediction")
         pipeline = Pipeline([
             ("preprocessor", preprocessor),
             ("model", info['model'])
         ])
-        pipeline.fit(X_train, y_train)
-        y_preds = pipeline.predict(X_test)
+        pipeline.fit(X_full, y_full)
+        preds = []
+        rolling_window = X_full.copy()
 
-        mse = mean_squared_error(y_test, y_preds)
-        r2 = r2_score(y_test, y_preds)
+        # AI Disclosure: ChatGPT wrote the sliding window technique used on the final test set
+        for timestamp, row in y_forecast.iterrows():
+            features = row.drop(labels=['temp']) if "temp" in row else row
+            features = features.to_frame().T
+
+            y_pred = pipeline.predict(features)[0]
+            preds.append(y_pred)
+
+            new_row = row.copy()
+            new_row["temp"] = y_pred
+            rolling_window.loc[timestamp] = new_row
+
+        y_forecast['predicted_temp'] = preds
+
+        common_idx = y_forecast['temp'].notna()
+        mse = mean_squared_error(y_forecast.loc[common_idx, "temp"],
+                                 y_forecast.loc[common_idx, "predicted_temp"])
+        r2 = r2_score(y_forecast.loc[common_idx, "temp"],
+                      y_forecast.loc[common_idx, "predicted_temp"])
+
         final_results[name] = {"test_mse": mse, "test_r2": r2}
         print(f"{name} model performance:")
         print(f"MSE average on test set: {mse}")
         print(f"R2 average on test: {r2}")
+
+        y_forecast.to_csv(f"forecast_{name.replace(' ', '_').lower()}.csv")
 
     return final_results
 
@@ -225,16 +248,17 @@ def main():
     X, y = download_data()
     X, y = prepare_data(X, y)
     X, y = impute_data(X, y)
-    X_train, X_test = split_data(X)
-    X_train, X_test, y, preprocessor = feature_engineering(X_train, X_test, y)
+    X_train, X_val = split_data(X)
+    X_train, X_val, y, preprocessor = feature_engineering(X_train, X_val, y)
     models = {
         "Linear Regression": LinearRegression(),
-        "Ridge": Ridge(alpha=1.0),
-        "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1)
+        "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1),
+        "Elastic Net": ElasticNet(alpha=0.001, l1_ratio=0.5, max_iter=5000),
+        "Gradient Boosting": GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=3)
     }
 
-    model_results = train_and_select_models(models, X_train, preprocessor)
-    final_results = evaluate_final_models(model_results, X_train, X_test, preprocessor)
+    model_results = train_and_select_models(models, X_train, X_val, preprocessor)
+    final_results = evaluate_final_models(model_results, X_train, X_val, y, preprocessor)
 
 
 if __name__ == "__main__":
