@@ -270,6 +270,10 @@ def main():
 
     model_results = train_and_select_models(models, X_train, X_val, preprocessor)
     final_results = evaluate_final_models(model_results, X_train, X_val, y, preprocessor)
+    
+    # generate visualizations
+    from visualizations import generate_all_plots
+    generate_all_plots()
 
 
 if __name__ == "__main__":
