@@ -66,7 +66,7 @@ def prepare_data(X, y):
             if mask.any():
                 violations[col] = df[mask]
         if violations:
-            print("Looking for impossible values:", violations)
+            print("Impossible values:", violations)
 
     # Make sure we don't accidentally fetch the same dates for training and prediction data
     assert X.index.max() < y.index.min(), "Training and prediction periods overlap!"
@@ -93,9 +93,10 @@ def impute_data(X, y):
         df['coco_missing'] = df['coco'].isna().astype(int)
         # Things never go the way you want them to though...
         df['coco'] = df['coco'].fillna(-1)
-        # Wind direction: forward fill then backfill for any remaining
-        # The circular encoding handles the 0=360 relationship
-        df['wdir'] = df['wdir'].ffill().bfill()
+        # See the Wind Direction under the README for this. The code below is doing what's stated in the README
+        # AI Disclosure: ChatGPT was used to produce the imputation code below for wind speed
+        df['wdir'] = np.degrees(np.angle(np.interp(df.index, df.index[~df['wdir'].isna()],
+                                                   np.exp(1j * np.radians(df['wdir'][~df['wdir'].isna()]))))) % 360
         return df
 
     X = _clean(X)
