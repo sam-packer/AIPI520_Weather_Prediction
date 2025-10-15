@@ -1,4 +1,5 @@
 from datetime import datetime
+import pytz
 from meteostat import Hourly
 import os
 import pandas as pd
@@ -14,13 +15,19 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 def download_data():
     # Let us be good people and not hammer their API if we already have the data
     if not os.path.exists("rdu_weather_data.csv") or not os.path.exists("rdu_weather_predict.csv"):
-        # TODO: Figure out how much data we should actually use.
-        # Linear regression would actually probably benefit from learning from less historical data
-        # A more advanced model might not
-        X_start = datetime(2018, 7, 20)
-        X_end = datetime(2025, 9, 16, 23, 59)
-        y_start = datetime(2025, 9, 17)
-        y_end = datetime(2025, 9, 30, 23, 59)
+        eastern = pytz.timezone("America/New_York")
+
+        # Get the datetimes for download in Eastern
+        X_start_et = eastern.localize(datetime(2018, 7, 20, 0, 0))
+        X_end_et = eastern.localize(datetime(2025, 9, 16, 23, 59))
+        y_start_et = eastern.localize(datetime(2025, 9, 17, 0, 0))
+        y_end_et = eastern.localize(datetime(2025, 9, 30, 23, 59))
+
+        # Convert to UTC for Meteostat
+        X_start = X_start_et.astimezone(pytz.UTC).replace(tzinfo=None)
+        X_end = X_end_et.astimezone(pytz.UTC).replace(tzinfo=None)
+        y_start = y_start_et.astimezone(pytz.UTC).replace(tzinfo=None)
+        y_end = y_end_et.astimezone(pytz.UTC).replace(tzinfo=None)
 
         print("Downloading RDU weather data, please wait...")
         X = Hourly('72306', X_start, X_end)
@@ -104,8 +111,10 @@ def impute_data(X, y):
     print("Done. Verification there are no missing values:")
     X_missing_summary = X.isna().mean().sort_values(ascending=False)
     y_missing_summary = y.isna().mean().sort_values(ascending=False)
-    print(X_missing_summary[X_missing_summary > 0] if (X_missing_summary > 0).any() else "No missing values in training data")
-    print(y_missing_summary[y_missing_summary > 0] if (y_missing_summary > 0).any() else "No missing values in test data")
+    print(X_missing_summary[X_missing_summary > 0] if (
+                X_missing_summary > 0).any() else "No missing values in training data")
+    print(
+        y_missing_summary[y_missing_summary > 0] if (y_missing_summary > 0).any() else "No missing values in test data")
     # AI Disclosure: ChatGPT helped me figure out you need sum() here twice for this test
     assert X.isna().sum().sum() == 0, "X still has missing values after imputation!"
     assert y.isna().sum().sum() == 0, "y still has missing values after imputation!"
@@ -120,10 +129,10 @@ def split_data(X):
 
     print(f"Train:\t\t {X_train.index.min()} to {X_train.index.max()} ({len(X_train)} rows)")
     print(f"Validation:\t {X_val.index.min()} to {X_val.index.max()} ({len(X_val)} rows)")
-    
+
     # Verify no temporal leakage
     assert X_train.index.max() < X_val.index.min(), "Train and validation overlap!"
-    
+
     return X_train, X_val
 
 
@@ -197,17 +206,17 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     X_full = X_full.drop(columns="temp")
 
     final_results = {}
-    
+
     # Always use Linear Regression (required)
     lr_model = ("Linear Regression", results["Linear Regression"])
-    
+
     # Find the best performing non-LR model
     non_lr_models = {k: v for k, v in results.items() if k != "Linear Regression"}
     best_other = min(non_lr_models.items(), key=lambda kv: kv[1]["val_mae"])
-    
+
     # Select these two models for final evaluation
     selected_models = [lr_model, best_other]
-    
+
     print("\nSelected models for final evaluation:")
     print(f"1. Linear Regression (required) - Validation MAE: {lr_model[1]['val_mae']:.2f}")
     print(f"2. {best_other[0]} (best other model) - Validation MAE: {best_other[1]['val_mae']:.2f}")
@@ -221,7 +230,7 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     y_forecast['wdir_cos'] = np.cos(np.radians(y_forecast['wdir']))
 
     for name, info in selected_models:
-        print(f"\nDoing final training on {name} using tested model and final 2 week prediction")
+        print(f"Running {name} using final 2 week prediction test data")
         pipeline = Pipeline([
             ("preprocessor", preprocessor),
             ("model", info['model'])
@@ -246,7 +255,7 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
 
         common_idx = y_forecast['temp'].notna()
         mae = mean_absolute_error(y_forecast.loc[common_idx, "temp"],
-                                 y_forecast.loc[common_idx, "predicted_temp"])
+                                  y_forecast.loc[common_idx, "predicted_temp"])
         r2 = r2_score(y_forecast.loc[common_idx, "temp"],
                       y_forecast.loc[common_idx, "predicted_temp"])
 
@@ -257,17 +266,17 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
 
         y_forecast.to_csv(f"forecast_{name.replace(' ', '_').lower()}.csv")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("RESULTS SUMMARY")
-    print("="*60)
+    print("=" * 60)
     print(f"{'Model':<25} {'Val MAE':>10} {'Test MAE':>10} {'Test R2':>10}")
-    print("-"*60)
+    print("-" * 60)
     for name in [m[0] for m in selected_models]:
         val_mae = results[name]['val_mae']
         test_mae = final_results[name]['test_mae']
         test_r2 = final_results[name]['test_r2']
         print(f"{name:<25} {val_mae:>10.2f} {test_mae:>10.2f} {test_r2:>10.3f}")
-    print("="*60)
+    print("=" * 60)
 
     return final_results
 
@@ -283,12 +292,13 @@ def main():
         "Linear Regression": LinearRegression(),
         "Random Forest": RandomForestRegressor(n_estimators=20, n_jobs=-1, random_state=random_seed),
         "Elastic Net": ElasticNet(alpha=0.001, l1_ratio=0.5, max_iter=5000, random_state=random_seed),
-        "Gradient Boosting": GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=3, random_state=random_seed)
+        "Gradient Boosting": GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=3,
+                                                       random_state=random_seed)
     }
 
     model_results = train_and_select_models(models, X_train, X_val, preprocessor)
     final_results = evaluate_final_models(model_results, X_train, X_val, y, preprocessor)
-    
+
     # Generate visualizations
     from visualizations import generate_all_plots
     generate_all_plots()
