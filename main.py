@@ -43,7 +43,10 @@ def prepare_data(X, y):
     for df in [X, y]:
         # Meteostat is really sneaky and actually uses UTC by default...
         # This converts it to Eastern Time. Good thing I read the documentation before doing anything else. Ha ha.
-        df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
+        else:
+            df.index = df.index.tz_convert("America/New_York")
 
         # We'll validate the data very early on to ensure there's no impossible values
         # AI Disclosure: ChatGPT was used to help make this final code work
@@ -127,6 +130,9 @@ def feature_engineering(X_train, X_test, y):
         df['hour'] = df.index.hour
         df['month'] = df.index.month
         df['day_of_week'] = df.index.dayofweek
+        # Transform wind direction to sin/cos to handle cyclical nature (0° = 360°)
+        df['wdir_sin'] = np.sin(np.radians(df['wdir']))
+        df['wdir_cos'] = np.cos(np.radians(df['wdir']))
         df = df.dropna().copy()
         return df
 
@@ -134,7 +140,7 @@ def feature_engineering(X_train, X_test, y):
     X_test = _engineer(X_test)
     y = _engineer(y)
 
-    numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres"]
+    numeric_features = ["rhum", "wspd", "wpgt", "prcp", "pres", "wdir_sin", "wdir_cos"]
     categorical_features = ["month", "hour", "day_of_week", "coco"]
 
     preprocessor = ColumnTransformer(
@@ -201,6 +207,9 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     y_forecast['hour'] = y_forecast.index.hour
     y_forecast['month'] = y_forecast.index.month
     y_forecast['day_of_week'] = y_forecast.index.dayofweek
+    # Transform wind direction to sin/cos
+    y_forecast['wdir_sin'] = np.sin(np.radians(y_forecast['wdir']))
+    y_forecast['wdir_cos'] = np.cos(np.radians(y_forecast['wdir']))
 
     for name, info in top_two:
         print(f"\nDoing final training on {name} using tested model and final 2 week prediction")
@@ -278,3 +287,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
