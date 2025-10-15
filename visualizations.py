@@ -15,13 +15,18 @@ from sklearn.metrics import r2_score, mean_absolute_error
 os.makedirs("visualizations", exist_ok=True)
 
 
-def plot_test_performance(y_forecast_files):
+def plot_test_performance(forecast_files):
     """Plot actual vs predicted for the test period."""
-    fig, axes = plt.subplots(len(y_forecast_files), 1, figsize=(14, 4 * len(y_forecast_files)), sharex=True)
-    if len(y_forecast_files) == 1:
+    # Ensure Linear Regression is plotted first
+    lr_file = [f for f in forecast_files if 'linear_regression' in f.lower()]
+    other_files = [f for f in forecast_files if 'linear_regression' not in f.lower()]
+    ordered_files = lr_file + other_files
+    
+    fig, axes = plt.subplots(len(ordered_files), 1, figsize=(14, 4 * len(ordered_files)), sharex=True)
+    if len(ordered_files) == 1:
         axes = [axes]
     
-    for i, filepath in enumerate(y_forecast_files):
+    for i, filepath in enumerate(ordered_files):
         df = pd.read_csv(filepath, index_col=0, parse_dates=True)
         model_name = os.path.basename(filepath).replace('forecast_', '').replace('.csv', '').replace('_', ' ').title()
         
@@ -47,19 +52,25 @@ def plot_test_performance(y_forecast_files):
     print("Saved: visualizations/test_predictions.png")
 
 
-def plot_forecast_horizon_degradation(y_forecast_files):
+def plot_forecast_horizon_degradation(forecast_files):
     """Show how prediction error changes as we forecast further into the future."""
+    
+    # Ensure Linear Regression is processed first for consistent coloring
+    lr_file = [f for f in forecast_files if 'linear_regression' in f.lower()]
+    other_files = [f for f in forecast_files if 'linear_regression' not in f.lower()]
+    ordered_files = lr_file + other_files
     
     # Read the forecast files
     forecasts = {}
-    for filepath in y_forecast_files:
+    for filepath in ordered_files:
         df = pd.read_csv(filepath, index_col=0, parse_dates=True)
         model_name = os.path.basename(filepath).replace('forecast_', '').replace('.csv', '').replace('_', ' ').title()
         forecasts[model_name] = df
     
     fig, axes = plt.subplots(2, 1, figsize=(14, 10))
     
-    colors = ['blue', 'green', 'orange', 'red']
+    # Define enough colors for any number of models
+    colors = ['blue', 'green', 'orange', 'red', 'purple', 'brown']
     
     # Plot 1: Scatter of errors with trend lines
     for i, (model_name, df) in enumerate(forecasts.items()):
@@ -68,7 +79,7 @@ def plot_forecast_horizon_degradation(y_forecast_files):
         errors = np.abs(actual - predicted)
         hours_ahead = range(len(df))
         
-        color = colors[i % len(colors)]
+        color = colors[i % len(colors)]  # Use modulo to cycle through colors if needed
         
         axes[0].scatter(hours_ahead, errors, alpha=0.4, s=20, label=model_name, color=color)
         
@@ -93,13 +104,12 @@ def plot_forecast_horizon_degradation(y_forecast_files):
         actual = df['temp'].values
         predicted = df['predicted_temp'].values
         errors = np.abs(actual - predicted)
-        hours_ahead = range(len(df))
         
         color = colors[i % len(colors)]
         
         # Calculate rolling average
         rolling_error = pd.Series(errors).rolling(window=window, min_periods=1).mean()
-        axes[1].plot(hours_ahead, rolling_error, linewidth=2, label=f'{model_name} (24h avg)', color=color)
+        axes[1].plot(rolling_error.index, rolling_error.values, linewidth=2, label=f'{model_name} (24h avg)', color=color)
     
     axes[1].set_title('Smoothed Error Progression (24-hour rolling average)', fontsize=14, fontweight='bold')
     axes[1].set_xlabel('Hours Ahead')

@@ -65,7 +65,8 @@ def prepare_data(X, y):
                 mask |= df[col] > high
             if mask.any():
                 violations[col] = df[mask]
-        print("Looking for impossible values:", violations)
+        if violations:
+            print("Looking for impossible values:", violations)
 
     # Make sure we don't accidentally fetch the same dates for training and prediction data
     assert X.index.max() < y.index.min(), "Training and prediction periods overlap!"
@@ -92,10 +93,9 @@ def impute_data(X, y):
         df['coco_missing'] = df['coco'].isna().astype(int)
         # Things never go the way you want them to though...
         df['coco'] = df['coco'].fillna(-1)
-        # See the Wind Direction under the README for this. The code below is doing what's stated in the README
-        # AI Disclosure: ChatGPT was used to produce the imputation code below for wind speed
-        df['wdir'] = np.degrees(np.angle(np.interp(df.index, df.index[~df['wdir'].isna()],
-                                                   np.exp(1j * np.radians(df['wdir'][~df['wdir'].isna()]))))) % 360
+        # Wind direction: forward fill then backfill for any remaining
+        # The circular encoding handles the 0=360 relationship
+        df['wdir'] = df['wdir'].ffill().bfill()
         return df
 
     X = _clean(X)
@@ -103,8 +103,8 @@ def impute_data(X, y):
     print("Done. Verification there are no missing values:")
     X_missing_summary = X.isna().mean().sort_values(ascending=False)
     y_missing_summary = y.isna().mean().sort_values(ascending=False)
-    print(X_missing_summary)
-    print(y_missing_summary)
+    print(X_missing_summary[X_missing_summary > 0] if (X_missing_summary > 0).any() else "No missing values in training data")
+    print(y_missing_summary[y_missing_summary > 0] if (y_missing_summary > 0).any() else "No missing values in test data")
     # AI Disclosure: ChatGPT helped me figure out you need sum() here twice for this test
     assert X.isna().sum().sum() == 0, "X still has missing values after imputation!"
     assert y.isna().sum().sum() == 0, "y still has missing values after imputation!"
@@ -119,6 +119,10 @@ def split_data(X):
 
     print(f"Train:\t\t {X_train.index.min()} to {X_train.index.max()} ({len(X_train)} rows)")
     print(f"Validation:\t {X_val.index.min()} to {X_val.index.max()} ({len(X_val)} rows)")
+    
+    # Verify no temporal leakage
+    assert X_train.index.max() < X_val.index.min(), "Train and validation overlap!"
+    
     return X_train, X_val
 
 
@@ -173,12 +177,10 @@ def train_and_select_models(models, X_train, X_val, preprocessor):
 
         pipeline.fit(X_train, y_train)
 
-        # print(pipeline.named_steps["preprocessor"].get_feature_names_out(X_train.columns))
+        val_pred = pipeline.predict(X_val)
 
-        val_prede = pipeline.predict(X_val)
-
-        mae = mean_absolute_error(y_val, val_prede)
-        r2 = r2_score(y_val, val_prede)
+        mae = mean_absolute_error(y_val, val_pred)
+        r2 = r2_score(y_val, val_pred)
 
         results[name] = {"val_mae": mae, "val_r2": r2, "model": model}
         print(f"{name} model performance:")
@@ -194,14 +196,20 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     X_full = X_full.drop(columns="temp")
 
     final_results = {}
-    # Select the top two models for the assignment
-    # AI Disclosure: ChatGPT helped write the code to sort the models from the dictionary
-    sorted_models = sorted(results.items(), key=lambda kv: kv[1]["val_mae"])
-    top_two = sorted_models[:2]
-
-    print("\nTop 2 models based on validation performance:")
-    for i, (name, info) in enumerate(top_two, 1):
-        print(f"{i}. {name} (Validation MAE: {info['val_mae']:.2f})")
+    
+    # Always use Linear Regression (required)
+    lr_model = ("Linear Regression", results["Linear Regression"])
+    
+    # Find the best performing non-LR model
+    non_lr_models = {k: v for k, v in results.items() if k != "Linear Regression"}
+    best_other = min(non_lr_models.items(), key=lambda kv: kv[1]["val_mae"])
+    
+    # Select these two models for final evaluation
+    selected_models = [lr_model, best_other]
+    
+    print("\nSelected models for final evaluation:")
+    print(f"1. Linear Regression (required) - Validation MAE: {lr_model[1]['val_mae']:.2f}")
+    print(f"2. {best_other[0]} (best other model) - Validation MAE: {best_other[1]['val_mae']:.2f}")
 
     y_forecast = y.copy()
     y_forecast['hour'] = y_forecast.index.hour
@@ -211,7 +219,7 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     y_forecast['wdir_sin'] = np.sin(np.radians(y_forecast['wdir']))
     y_forecast['wdir_cos'] = np.cos(np.radians(y_forecast['wdir']))
 
-    for name, info in top_two:
+    for name, info in selected_models:
         print(f"\nDoing final training on {name} using tested model and final 2 week prediction")
         pipeline = Pipeline([
             ("preprocessor", preprocessor),
@@ -253,7 +261,7 @@ def evaluate_final_models(results, X_train, X_val, y, preprocessor):
     print("="*60)
     print(f"{'Model':<25} {'Val MAE':>10} {'Test MAE':>10} {'Test R2':>10}")
     print("-"*60)
-    for name in [m[0] for m in top_two]:
+    for name in [m[0] for m in selected_models]:
         val_mae = results[name]['val_mae']
         test_mae = final_results[name]['test_mae']
         test_r2 = final_results[name]['test_r2']
@@ -280,11 +288,10 @@ def main():
     model_results = train_and_select_models(models, X_train, X_val, preprocessor)
     final_results = evaluate_final_models(model_results, X_train, X_val, y, preprocessor)
     
-    # generate visualizations
+    # Generate visualizations
     from visualizations import generate_all_plots
     generate_all_plots()
 
 
 if __name__ == "__main__":
     main()
-
